@@ -477,7 +477,13 @@ def gen_judgments(
         nltk.download('averaged_perceptron_tagger')
         
         # Get questions for this category
-        if_questions = list(set([m.question for m in old_instruction_following_matches]))
+        seen_qids: set = set()
+        if_questions = []
+        for m in old_instruction_following_matches:
+            qid = m.question.get('question_id')
+            if qid not in seen_qids:
+                seen_qids.add(qid)
+                if_questions.append(m.question)
         task_name = if_questions[0]['task']
 
         # Build a qid-keyed answer view from the matches themselves so colliding

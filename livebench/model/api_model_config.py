@@ -56,6 +56,12 @@ def get_model_config(model_name: str) -> ModelConfig:
             return name.startswith(alias[:-1].lower())
         return name == alias.lower()
 
+    def _wildcard_alias_matches(name: str, model_config: ModelConfig) -> bool:
+        return bool(model_config.aliases and any(
+            a.endswith('*') and name.startswith(a[:-1].lower())
+            for a in model_config.aliases
+        ))
+
     for model_config in model_configs.values():
         if model_name.lower() == model_config.display_name.lower() or (model_config.aliases and any(_alias_matches(model_name.lower(), a) for a in model_config.aliases)):
             matches.append(model_config)
@@ -71,4 +77,10 @@ def get_model_config(model_name: str) -> ModelConfig:
             api_kwargs={}
         )
     else:
-        return matches[0]
+        config = matches[0]
+        # Wildcard alias: the config's api_name.local was written for the base model name.
+        # Override it with the actual queried name so vLLM receives the right served-model-name.
+        if _wildcard_alias_matches(model_name.lower(), config):
+            from dataclasses import replace as dc_replace
+            config = dc_replace(config, api_name={**config.api_name, 'local': model_name})
+        return config
