@@ -78,9 +78,15 @@ def get_model_config(model_name: str) -> ModelConfig:
         )
     else:
         config = matches[0]
-        # Wildcard alias: the config's api_name.local was written for the base model name.
-        # Override it with the actual queried name so vLLM receives the right served-model-name.
+        # Wildcard alias: display_name and api_name.local were written for the base model.
+        # Override both with the actual queried name so (a) answer/judgment files are stored
+        # per-model rather than all colliding under the base display_name, and (b) vLLM
+        # receives the correct served-model-name.
         if _wildcard_alias_matches(model_name.lower(), config):
             from dataclasses import replace as dc_replace
-            config = dc_replace(config, api_name={**config.api_name, 'local': model_name})
+            config = dc_replace(
+                config,
+                display_name=model_name.lower(),
+                api_name={**config.api_name, 'local': model_name},
+            )
         return config
