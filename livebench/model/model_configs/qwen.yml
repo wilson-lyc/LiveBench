@@ -373,6 +373,7 @@ cost_per_million:
   output: 0.25
 api_name:
   together: Qwen/Qwen3.5-9B
+  local: Qwen3.5-9B
 api_kwargs:
   default:
     # thinking is ON by default for Qwen3.5; no enable_thinking toggle needed
