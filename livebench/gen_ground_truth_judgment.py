@@ -497,15 +497,17 @@ def gen_judgments(
             for q in if_answers[m]:
                 if_answers[m][q]['choices'][0]['turns'][0] = re.sub(f"<think>.*?<\/think>", "", if_answers[m][q]['choices'][0]['turns'][0], flags=re.DOTALL).strip()
 
+        questions_by_qid = {q["question_id"]: q for q in if_questions}
         for model_id in models:
             scores = instruction_following_process_results(if_questions, if_answers, task_name, model_id, debug)
             for item in scores:
                 question_id = item["question_id"]
                 score = item["score"]
                 turn = 1
+                question_obj = [questions_by_qid[question_id]] if question_id in questions_by_qid else []
                 result = {
                     "question_id": question_id,
-                    "task": task_name,
+                    "task": question_obj[0]["task"] if question_obj else task_name,
                     "model": model_id,
                     "score": score,
                     "turn": turn,
@@ -522,7 +524,6 @@ def gen_judgments(
                     f"score: {score}, ")
 
                 # Find the output file for this question
-                question_obj = [q for q in if_questions if q['question_id'] == question_id]
                 if question_obj and '_output_file' in question_obj[0]:
                     out_file = question_obj[0]['_output_file']
                 elif output_file:
