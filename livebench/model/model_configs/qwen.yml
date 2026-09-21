@@ -385,6 +385,34 @@ api_kwargs:
     max_tokens: 65536
     stream: true
 ---
+# Qwen3.5-2B, served locally via vLLM in auto_eval (SAQ/auto_eval/run.py), both the
+# full-precision leg (served-model-name Qwen3.5-2B) and quantized legs (e.g.
+# Qwen3.5-2B-NVFP4) matched by the wildcard alias below. Thinking is ON by default
+# for Qwen3.5. Bumped from the gen_api_answer.py CLI default (max_tokens=4096):
+# 20260921 auto_eval run (history/20260921-080923) showed ~200/532 LiveBench
+# questions (~38%) scoring 0 with finish_reason='length' and content=None — the
+# reasoning content alone filled the 4096-token cap (often stuck in repetitive
+# loops on harder Connections/math questions) before any final answer was
+# emitted. Failure rate was the same for bf16 and NVFP4, so this is a max_tokens
+# ceiling issue, not a quantization regression. Cap set explicitly (never null —
+# an unset cap inherits the provider default and silently truncates; same
+# lesson as deepseek-0731).
+display_name: qwen3.5-2b
+cost_per_million:
+  input: 0.0
+  cached_input: 0.0
+  output: 0.0
+api_name:
+  local: Qwen3.5-2B
+aliases:
+  - Qwen3.5-2B-*
+api_kwargs:
+  default:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 32768
+    stream: true
+---
 # Qwen3.5-9B base leg for Balajee's RL pair, served on a self-hosted RunPod
 # vLLM (full precision, /workspace/qwen3.5-9b, max_model_len 262144 — probed
 # live, verified 2026-08-19, https://4wh5ju4vjhxmp8-8000.proxy.runpod.net/v1).
