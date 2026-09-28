@@ -86,6 +86,30 @@ def reorg_output_file(output_file):
             fout.write(judgments[key])
 
 
+def remove_model_judgments(output_file, models):
+    """Drop the judgments of `models` (lowercase names) from a shared judgment file,
+    keeping every other model's lines untouched. Undecodable lines are kept as-is
+    (reorg_output_file() deals with them)."""
+    kept = []
+    removed = 0
+    with open(output_file, "r", errors="replace") as fin:
+        for l in fin:
+            try:
+                model = json.loads(l).get("model", "").lower()
+            except (json.JSONDecodeError, AttributeError):
+                kept.append(l)
+                continue
+            if model in models:
+                removed += 1
+            else:
+                kept.append(l)
+    tmp_file = output_file + ".tmp"
+    with open(tmp_file, "w") as fout:
+        fout.writelines(kept)
+    os.replace(tmp_file, output_file)
+    print(f"remove_model_judgments: removed {removed} judgment(s) of {sorted(models)} from {output_file}")
+
+
 def play_a_match_gt(match: MatchSingle, output_file: str | None = None, debug=False):
     """
     Evaluate a model's answer to a question.
@@ -310,12 +334,15 @@ def gen_judgments(
         if '_output_file' in question:
             output_files.add(question['_output_file'])
     
-    # Create directories and optionally remove existing files
+    # Create directories and optionally drop the evaluated models' existing judgments.
+    # The judgment file is shared by every model, so only this run's models are removed --
+    # deleting the whole file would silently wipe every other model's scores.
+    models_to_remove = {m.lower() for m in (model_list if model_list is not None else models)}
     for out_file in output_files:
         if '/' in out_file:
             os.makedirs(os.path.dirname(out_file), exist_ok=True)
         if out_file and os.path.exists(out_file) and remove_existing_file:
-            os.remove(out_file)
+            remove_model_judgments(out_file, models_to_remove)
 
     # Load existing judgments if in resume mode
     existing_answer_ids = set()
@@ -498,7 +525,9 @@ def gen_judgments(
                 if_answers[m][q]['choices'][0]['turns'][0] = re.sub(f"<think>.*?<\/think>", "", if_answers[m][q]['choices'][0]['turns'][0], flags=re.DOTALL).strip()
 
         questions_by_qid = {q["question_id"]: q for q in if_questions}
-        for model_id in models:
+        # Only models that still have IF matches: under --resume a fully judged model is
+        # filtered out of the matches entirely and has no entry in if_answers.
+        for model_id in if_answers:
             scores = instruction_following_process_results(if_questions, if_answers, task_name, model_id, debug)
             for item in scores:
                 question_id = item["question_id"]
@@ -601,7 +630,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--remove-existing-file", action="store_true", default=False,
-        help="Remove existing judgment file."
+        help="Remove the evaluated models' existing judgments (other models' judgments in the shared file are kept)."
     )
     parser.add_argument(
         "--question-source", type=str, default="huggingface", help="The source of the questions. 'huggingface' will draw questions from huggingface. 'jsonl' will gather local jsonl files at data/{bench_name}/**/question.jsonl to permit tweaking or writing custom questions."

@@ -574,7 +574,7 @@ def main():
     parser.add_argument("--stream", action="store_true", help="Enable streaming mode")
     parser.add_argument("--use-litellm", action="store_true", help="Route requests through LiteLLM instead of per-provider clients")
     parser.add_argument("--remove-existing-judgment-file", action="store_true",
-                      help="Remove existing judgment file before running")
+                      help="Remove the evaluated models' existing judgments before running (other models' are kept)")
     parser.add_argument("--only-incorrect", action="store_true",
                       help="When used with --resume-grading or --resume, only re-evaluate questions that previously scored 0")
     parser.add_argument("--ignore-missing-answers", action="store_true",
