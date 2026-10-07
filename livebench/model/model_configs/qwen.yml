@@ -413,6 +413,30 @@ api_kwargs:
     max_tokens: 32768
     stream: true
 ---
+# Qwen3.5-27B, served locally via vLLM in auto_eval (SAQ/auto_eval/run.py), both the
+# full-precision leg (served-model-name Qwen3.5-27B) and quantized legs (e.g.
+# Qwen3.5-27B-NVFP4) matched by the wildcard alias below. Same 4096-token
+# truncation as Qwen3.5-2B without this entry: 20261007 auto_eval run
+# (history/20261007-142704) had every math request end with finish_reason='length',
+# completion_tokens=4096 and content=None. max_tokens 32768 mirrors the 2B entry;
+# the auto_eval serve config must give --max-model-len > max_tokens + prompt
+# (vLLM rejects the request otherwise), hence --max-model-len 65536 there.
+display_name: qwen3.5-27b
+cost_per_million:
+  input: 0.0
+  cached_input: 0.0
+  output: 0.0
+api_name:
+  local: Qwen3.5-27B
+aliases:
+  - Qwen3.5-27B-*
+api_kwargs:
+  default:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 32768
+    stream: true
+---
 # Qwen3.5-9B base leg for Balajee's RL pair, served on a self-hosted RunPod
 # vLLM (full precision, /workspace/qwen3.5-9b, max_model_len 262144 — probed
 # live, verified 2026-08-19, https://4wh5ju4vjhxmp8-8000.proxy.runpod.net/v1).
