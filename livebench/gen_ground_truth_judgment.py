@@ -33,6 +33,7 @@ from livebench.process_results.writing.typos.utils import typos_process_results
 from livebench.process_results.writing.connections.utils import get_connections_puzzle_evaluator
 from livebench.process_results.coding.utils import LCB_generation_process_results, code_generation_process_results, agentic_coding_process_results
 from livebench.process_results.instruction_following.utils import instruction_following_process_results, ifbench_process_results
+from livebench.if_runner.ifbench.instructions_util import ensure_nltk_resource
 from livebench.process_results.reasoning.web_of_lies_v3.utils import web_of_lies_v3_process_results
 from livebench.process_results.reasoning.theory_of_mind.utils import theory_of_mind_process_results
 from livebench.process_results.reasoning.logic_with_navigation.utils import logic_with_navigation_process_results
@@ -499,9 +500,9 @@ def gen_judgments(
     # Process old instruction following matches if any
     if old_instruction_following_matches:
         print(f'Processing {len(old_instruction_following_matches)} old instruction following matches')
-        nltk.download('punkt')
-        nltk.download('punkt_tab')
-        nltk.download('averaged_perceptron_tagger')
+        ensure_nltk_resource('punkt', 'tokenizers/punkt')
+        ensure_nltk_resource('punkt_tab', 'tokenizers/punkt_tab')
+        ensure_nltk_resource('averaged_perceptron_tagger', 'taggers/averaged_perceptron_tagger')
         
         # Get questions for this category
         seen_qids: set = set()

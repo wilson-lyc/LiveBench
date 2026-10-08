@@ -1548,12 +1548,21 @@ WORD_LIST = [
     "apartment",
 ]  # pylint: disable=line-too-long
 
+def ensure_nltk_resource(package: str, resource_path: str) -> None:
+    """Download an nltk package only if it is not already installed.
+
+    nltk.download() always fetches the remote index from GitHub (even when the package is
+    present locally), so calling it unconditionally hits the network on every call.
+    """
+    try:
+        nltk.data.find(resource_path)
+    except LookupError:
+        nltk.download(package)
+
+
 def download_nltk_resources():
     """Download 'punkt' if not already installed"""
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt")
+    ensure_nltk_resource("punkt", "tokenizers/punkt")
 
 
 download_nltk_resources()
@@ -1633,10 +1642,15 @@ def _get_sentence_tokenizer():
     return nltk.data.load("nltk:tokenizers/punkt/english.pickle")
 
 
+@functools.lru_cache(maxsize=None)
+def _english_stopwords() -> frozenset[str]:
+    ensure_nltk_resource("stopwords", "corpora/stopwords")
+    return frozenset(nltk.corpus.stopwords.words('english'))
+
+
 def count_stopwords(text: str) -> int:
     """Counts the number of stopwords."""
-    nltk.download('stopwords')
-    stopwords = nltk.corpus.stopwords.words('english')
+    stopwords = _english_stopwords()
     tokenizer = nltk.tokenize.RegexpTokenizer(r"\w+")
     tokens = tokenizer.tokenize(text)
     num_stopwords = len([t for t in tokens if t.lower() in stopwords])
