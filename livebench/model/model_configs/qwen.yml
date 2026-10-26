@@ -373,9 +373,6 @@ cost_per_million:
   output: 0.25
 api_name:
   together: Qwen/Qwen3.5-9B
-  local: Qwen3.5-9B
-aliases:
-  - Qwen3.5-9B-*
 api_kwargs:
   default:
     # thinking is ON by default for Qwen3.5; no enable_thinking toggle needed
@@ -383,58 +380,6 @@ api_kwargs:
     temperature: 1.0
     top_p: 0.95
     max_tokens: 65536
-    stream: true
----
-# Qwen3.5-2B, served locally via vLLM in auto_eval (SAQ/auto_eval/run.py), both the
-# full-precision leg (served-model-name Qwen3.5-2B) and quantized legs (e.g.
-# Qwen3.5-2B-NVFP4) matched by the wildcard alias below. Thinking is ON by default
-# for Qwen3.5. Bumped from the gen_api_answer.py CLI default (max_tokens=4096):
-# 20260921 auto_eval run (history/20260921-080923) showed ~200/532 LiveBench
-# questions (~38%) scoring 0 with finish_reason='length' and content=None — the
-# reasoning content alone filled the 4096-token cap (often stuck in repetitive
-# loops on harder Connections/math questions) before any final answer was
-# emitted. Failure rate was the same for bf16 and NVFP4, so this is a max_tokens
-# ceiling issue, not a quantization regression. Cap set explicitly (never null —
-# an unset cap inherits the provider default and silently truncates; same
-# lesson as deepseek-0731).
-display_name: qwen3.5-2b
-cost_per_million:
-  input: 0.0
-  cached_input: 0.0
-  output: 0.0
-api_name:
-  local: Qwen3.5-2B
-aliases:
-  - Qwen3.5-2B-*
-api_kwargs:
-  default:
-    temperature: 1.0
-    top_p: 0.95
-    max_tokens: 32768
-    stream: true
----
-# Qwen3.5-27B, served locally via vLLM in auto_eval (SAQ/auto_eval/run.py), both the
-# full-precision leg (served-model-name Qwen3.5-27B) and quantized legs (e.g.
-# Qwen3.5-27B-NVFP4) matched by the wildcard alias below. Same 4096-token
-# truncation as Qwen3.5-2B without this entry: 20261007 auto_eval run
-# (history/20261007-142704) had every math request end with finish_reason='length',
-# completion_tokens=4096 and content=None. max_tokens 32768 mirrors the 2B entry;
-# the auto_eval serve config must give --max-model-len > max_tokens + prompt
-# (vLLM rejects the request otherwise), hence --max-model-len 65536 there.
-display_name: qwen3.5-27b
-cost_per_million:
-  input: 0.0
-  cached_input: 0.0
-  output: 0.0
-api_name:
-  local: Qwen3.5-27B
-aliases:
-  - Qwen3.5-27B-*
-api_kwargs:
-  default:
-    temperature: 1.0
-    top_p: 0.95
-    max_tokens: 32768
     stream: true
 ---
 # Qwen3.5-9B base leg for Balajee's RL pair, served on a self-hosted RunPod
@@ -493,84 +438,3 @@ api_kwargs:
     stream: true
     extra_body:
       enable_thinking: true
----
-# Qwen3-0.6B (dense, thinking ON by default), served locally via vLLM in auto_eval
-# (SAQ/auto_eval/run.py), full-precision leg (served-model-name Qwen3-0.6B) and quantized
-# legs (e.g. Qwen3-0.6B-NVFP4) matched by the wildcard alias below. Without this entry the
-# gen_api_answer.py default max_tokens=4096 applies: 20261010 auto_eval run
-# (history/20261010-175635) had 92-124 of 182 math answers per model end as $ERROR$
-# ("No message returned") because the reasoning alone filled the 4096-token cap.
-# Model card (huggingface.co/Qwen/Qwen3-0.6B): thinking-mode sampling temp 0.6 / top_p 0.95 /
-# top_k 20, recommended max output 32768; max_position_embeddings is 40960, so 32768 plus
-# the prompt still fits the default vLLM --max-model-len.
-display_name: qwen3-0.6b
-cost_per_million:
-  input: 0.0
-  cached_input: 0.0
-  output: 0.0
-api_name:
-  local: Qwen3-0.6B
-aliases:
-  - Qwen3-0.6B-*
-api_kwargs:
-  default:
-    temperature: 0.6
-    top_p: 0.95
-    max_tokens: 32768
-    stream: true
-    extra_body:
-      top_k: 20
----
-# Qwen3-4B (dense, thinking ON by default), served locally via vLLM in auto_eval
-# (SAQ/auto_eval/run.py), full-precision leg (served-model-name Qwen3-4B) and quantized
-# legs (e.g. Qwen3-4B-NVFP4) matched by the wildcard alias below. Without this entry the
-# gen_api_answer.py default max_tokens=4096 applies: 20261010 auto_eval run
-# (history/20261010-175635) had 92-124 of 182 math answers per model end as $ERROR$
-# ("No message returned") because the reasoning alone filled the 4096-token cap.
-# Model card (huggingface.co/Qwen/Qwen3-4B): thinking-mode sampling temp 0.6 / top_p 0.95 /
-# top_k 20, recommended max output 32768; max_position_embeddings is 40960, so 32768 plus
-# the prompt still fits the default vLLM --max-model-len.
-display_name: qwen3-4b
-cost_per_million:
-  input: 0.0
-  cached_input: 0.0
-  output: 0.0
-api_name:
-  local: Qwen3-4B
-aliases:
-  - Qwen3-4B-*
-api_kwargs:
-  default:
-    temperature: 0.6
-    top_p: 0.95
-    max_tokens: 32768
-    stream: true
-    extra_body:
-      top_k: 20
----
-# Qwen3-8B (dense, thinking ON by default), served locally via vLLM in auto_eval
-# (SAQ/auto_eval/run.py), full-precision leg (served-model-name Qwen3-8B) and quantized
-# legs (e.g. Qwen3-8B-NVFP4) matched by the wildcard alias below. Without this entry the
-# gen_api_answer.py default max_tokens=4096 applies: 20261010 auto_eval run
-# (history/20261010-175635) had 92-124 of 182 math answers per model end as $ERROR$
-# ("No message returned") because the reasoning alone filled the 4096-token cap.
-# Model card (huggingface.co/Qwen/Qwen3-8B): thinking-mode sampling temp 0.6 / top_p 0.95 /
-# top_k 20, recommended max output 32768; max_position_embeddings is 40960, so 32768 plus
-# the prompt still fits the default vLLM --max-model-len.
-display_name: qwen3-8b
-cost_per_million:
-  input: 0.0
-  cached_input: 0.0
-  output: 0.0
-api_name:
-  local: Qwen3-8B
-aliases:
-  - Qwen3-8B-*
-api_kwargs:
-  default:
-    temperature: 0.6
-    top_p: 0.95
-    max_tokens: 32768
-    stream: true
-    extra_body:
-      top_k: 20

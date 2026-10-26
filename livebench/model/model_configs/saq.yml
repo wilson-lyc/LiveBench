@@ -1,0 +1,52 @@
+# Models served locally via vLLM by SAQ's auto_eval (SAQ/auto_eval/run.py): one entry per model
+# series, so every size and every quantized variant of a series is asked with the same api_kwargs.
+# The wildcard alias matches the base model (served-model-name e.g. Qwen3.5-9B) and its variants
+# (e.g. Qwen3.5-9B-NVFP4); get_model_config then stores answers/judgments under the queried name
+# and prefers this entry over an upstream one of the same name (upstream qwen.yml's qwen3.5-9b).
+#
+# max_tokens is set explicitly, never left to gen_api_answer.py's default of 4096: the reasoning
+# alone fills that cap (20260921 run: ~200/532 Qwen3.5-2B answers scored 0 with
+# finish_reason='length' and content=None, bf16 and NVFP4 alike; 20261010 run: 92-124 of 182
+# Qwen3 math answers per model $ERROR$). vLLM caps it further at --max-model-len minus the
+# prompt, so give every model of a comparison the same --max-model-len.
+#
+# Sampling params left unset fall back to vLLM's defaults: the HF base checkpoints ship no
+# generation_config.json and the quantized ones carry only eos_token_id, so variants agree.
+#
+# Qwen3.5 (thinking ON by default). Values unchanged since the first LiveBench runs.
+display_name: saq-qwen3.5
+cost_per_million:
+  input: 0.0
+  cached_input: 0.0
+  output: 0.0
+api_name:
+  local: Qwen3.5
+aliases:
+  - Qwen3.5-*
+api_kwargs:
+  default:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 32768
+    stream: true
+---
+# Qwen3 dense (thinking ON by default). Model card (huggingface.co/Qwen/Qwen3-8B): thinking-mode
+# sampling temp 0.6 / top_p 0.95 / top_k 20, recommended max output 32768;
+# max_position_embeddings is 40960, so 32768 plus the prompt fits the default --max-model-len.
+display_name: saq-qwen3
+cost_per_million:
+  input: 0.0
+  cached_input: 0.0
+  output: 0.0
+api_name:
+  local: Qwen3
+aliases:
+  - Qwen3-*
+api_kwargs:
+  default:
+    temperature: 0.6
+    top_p: 0.95
+    max_tokens: 32768
+    stream: true
+    extra_body:
+      top_k: 20

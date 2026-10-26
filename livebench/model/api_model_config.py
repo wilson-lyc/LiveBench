@@ -65,6 +65,11 @@ def get_model_config(model_name: str) -> ModelConfig:
     for model_config in model_configs.values():
         if model_name.lower() == model_config.display_name.lower() or (model_config.aliases and any(_alias_matches(model_name.lower(), a) for a in model_config.aliases)):
             matches.append(model_config)
+    # A wildcard alias claims a whole series of locally served names (model_configs/saq.yml),
+    # the base model's name included, so it wins over an upstream entry of that name.
+    wildcard = [c for c in matches if _wildcard_alias_matches(model_name.lower(), c)]
+    if len(matches) > 1 and len(wildcard) == 1:
+        matches = wildcard
     if len(matches) > 1:
         raise ValueError(f"Multiple model configs found for {model_name}")
     elif len(matches) == 0:
