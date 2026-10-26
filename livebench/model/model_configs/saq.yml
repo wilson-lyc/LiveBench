@@ -10,10 +10,15 @@
 # Qwen3 math answers per model $ERROR$). vLLM caps it further at --max-model-len minus the
 # prompt, so give every model of a comparison the same --max-model-len.
 #
-# Sampling params left unset fall back to vLLM's defaults: the HF base checkpoints ship no
-# generation_config.json and the quantized ones carry only eos_token_id, so variants agree.
+# Every sampling param the model card recommends is set here, per request, rather than as vLLM
+# serve defaults (--override-generation-config), which would also change what lm-eval and the
+# C4 tasks get from the same deployment. Params left unset fall back to vLLM's defaults, the
+# same for every variant: the HF base checkpoints ship no generation_config.json and the
+# quantized ones carry only eos_token_id. vLLM-only params go in extra_body.
 #
-# Qwen3.5 (thinking ON by default). Values unchanged since the first LiveBench runs.
+# Qwen3.5 (thinking ON by default). Model card (huggingface.co/Qwen/Qwen3.5-9B), thinking mode
+# for general tasks: temperature 1.0 / top_p 0.95 / top_k 20 / min_p 0 / presence_penalty 1.5 /
+# repetition_penalty 1.0; output length 32768 for most queries.
 display_name: saq-qwen3.5
 cost_per_million:
   input: 0.0
@@ -27,11 +32,16 @@ api_kwargs:
   default:
     temperature: 1.0
     top_p: 0.95
+    presence_penalty: 1.5
     max_tokens: 32768
     stream: true
+    extra_body:
+      top_k: 20
+      min_p: 0.0
+      repetition_penalty: 1.0
 ---
-# Qwen3 dense (thinking ON by default). Model card (huggingface.co/Qwen/Qwen3-8B): thinking-mode
-# sampling temp 0.6 / top_p 0.95 / top_k 20, recommended max output 32768;
+# Qwen3 dense (thinking ON by default). Model card (huggingface.co/Qwen/Qwen3-8B), thinking mode:
+# temperature 0.6 / top_p 0.95 / top_k 20 / min_p 0, recommended max output 32768;
 # max_position_embeddings is 40960, so 32768 plus the prompt fits the default --max-model-len.
 display_name: saq-qwen3
 cost_per_million:
@@ -50,3 +60,4 @@ api_kwargs:
     stream: true
     extra_body:
       top_k: 20
+      min_p: 0.0
