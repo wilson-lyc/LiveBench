@@ -36,6 +36,46 @@ def anthropic_api_key(model: str) -> str | None:
         return os.environ['ANTHROPIC_SKIP_ZDR_API_KEY']
     return os.environ.get('ANTHROPIC_API_KEY')
 
+
+def billed_output_tokens(usage: Any, provider_total_tokens: int | None = None) -> int | None:
+    """Billed output tokens from an OpenAI-shaped usage (litellm Usage or openai SDK CompletionUsage):
+    completion_tokens, plus reasoning_tokens only when the provider accounts reasoning OUTSIDE
+    completion_tokens.
+
+    completion_tokens_details.reasoning_tokens is a breakdown, not an addend, for most providers:
+    OpenAI, Anthropic and Mistral include thinking in completion_tokens, and when the provider
+    reports no reasoning count litellm fills one in from its own token_counter over the reasoning
+    text. Adding it unconditionally double-counted thinking (Mistral Large 4: recorded output was
+    ~2x; every exhausted answer corrected to exactly max_tokens once litellm's estimate was taken
+    back out). xAI is the exception: it bills reasoning outside completion_tokens and says so in
+    total_tokens (= prompt + completion + reasoning). That invariant is the only signal used here --
+    it is the same test litellm's own xAI transform applies before folding, so it also stays right
+    on litellm versions that already fold xAI reasoning in (total then equals prompt + completion).
+
+    provider_total_tokens: the provider's own total for streamed responses, whose usage is rebuilt
+    by stream_chunk_builder with total recomputed as prompt + completion.
+    """
+    completion = getattr(usage, 'completion_tokens', None)
+    if completion is None:
+        return None
+    _ctd = getattr(usage, 'completion_tokens_details', None)
+    # some OpenAI-compatible providers report it top-level instead of under completion_tokens_details
+    reasoning = (getattr(_ctd, 'reasoning_tokens', None) if _ctd is not None else None) or getattr(usage, 'reasoning_tokens', None) or 0
+    prompt = getattr(usage, 'prompt_tokens', None) or 0
+    total = provider_total_tokens if provider_total_tokens is not None else getattr(usage, 'total_tokens', None)
+    if reasoning and total == prompt + completion + reasoning:
+        return completion + reasoning
+    return completion
+
+
+def litellm_stream_provider_total(chunks: list) -> int | None:
+    """total_tokens from the last streamed chunk that carries usage (the provider's own figure)."""
+    for chunk in reversed(chunks):
+        usage = getattr(chunk, 'usage', None)
+        if usage is not None:
+            return getattr(usage, 'total_tokens', None)
+    return None
+
 # model api function takes in Model, list of messages, temperature, max tokens, api kwargs, and an api dict
 # returns tuple of (output, num tokens)
 Conversation = list[dict[str, str]]
@@ -58,6 +98,30 @@ def retry_log(retry_state):
     exception = retry_state.outcome.exception()
     logger.warning(f"{retry_state.fn.__name__}: attempt {retry_state.attempt_number} failed with {exception.__class__.__name__}: {exception}; {retry_state.seconds_since_start} seconds elapsed total")
     logger.warning("Exception stack trace:", exc_info=exception)
+
+
+def _split_content_chunks(content) -> tuple[str, str]:
+    """(text, reasoning) from a message/delta content that may be a chunk list.
+
+    Mistral reasoning models (reasoning_effort set) return content as a list:
+    [{type:'thinking', thinking:[{type:'text', text:...}]}, {type:'text', text:...}],
+    and stream deltas mix plain strings with such lists. Plain strings pass through.
+    """
+    if content is None:
+        return '', ''
+    if isinstance(content, str):
+        return content, ''
+    text, reasoning = [], []
+    for chunk in content:
+        chunk = chunk if isinstance(chunk, dict) else chunk.model_dump()
+        if chunk.get('type') == 'text':
+            text.append(chunk.get('text') or '')
+        elif chunk.get('type') == 'thinking':
+            for inner in chunk.get('thinking') or []:
+                inner = inner if isinstance(inner, dict) else inner.model_dump()
+                if inner.get('type') == 'text':
+                    reasoning.append(inner.get('text') or '')
+    return ''.join(text), ''.join(reasoning)
 
 
 @retry(
@@ -121,15 +185,16 @@ def chat_completion_openai(
             try:
                 for chunk in stream:
                     if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
-                        message += chunk.choices[0].delta.content
+                        _text, _thinking = _split_content_chunks(chunk.choices[0].delta.content)
+                        message += _text
+                        reasoning_text += _thinking
                     if chunk.choices and len(chunk.choices) > 0:
                         _r = getattr(chunk.choices[0].delta, 'reasoning_content', None)
                         if _r:
                             reasoning_text += _r
                     if chunk.usage is not None:
-                        num_tokens = chunk.usage.completion_tokens
-                        if hasattr(chunk.usage, 'reasoning_tokens'):
-                            num_tokens += chunk.usage.reasoning_tokens
+                        # raw provider usage (no litellm rewrite), so its own total_tokens is intact
+                        num_tokens = billed_output_tokens(chunk.usage)
                         input_tokens = chunk.usage.prompt_tokens
                         if hasattr(chunk.usage, 'prompt_tokens_details') and chunk.usage.prompt_tokens_details is not None:
                             cached_tokens = chunk.usage.prompt_tokens_details.cached_tokens
@@ -152,16 +217,12 @@ def chat_completion_openai(
             if isinstance(response.choices[0], str):
                 message = response.choices[0]
             else:
-                message = response.choices[0].message.content
-                reasoning_text = getattr(response.choices[0].message, 'reasoning_content', None) or ''
+                message, reasoning_text = _split_content_chunks(response.choices[0].message.content)
+                reasoning_text = getattr(response.choices[0].message, 'reasoning_content', None) or reasoning_text
             input_tokens = None
             cached_tokens = None
             if response.usage is not None:
-                num_tokens = response.usage.completion_tokens
-                if hasattr(response.usage, 'completion_tokens_details') and hasattr(response.usage.completion_tokens_details, 'reasoning_tokens'):
-                    reasoning_tokens = response.usage.completion_tokens_details.reasoning_tokens
-                    if num_tokens is not None and reasoning_tokens is not None:
-                        num_tokens += reasoning_tokens
+                num_tokens = billed_output_tokens(response.usage)
                 input_tokens = response.usage.prompt_tokens
                 if hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details is not None:
                     cached_tokens = response.usage.prompt_tokens_details.cached_tokens
@@ -352,6 +413,115 @@ def gemini_custom_wait(retry_state):
     # other errors might indicate rate limiting, wait for these
     return val
 
+GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# Each chunk is capped server-side (32768 tokens non-streaming), so 40 chunks
+# covers a full 1M-token output window.
+GEMINI_MAX_CHUNKS = 40
+GEMINI_CHUNK_ATTEMPTS = 6
+
+
+def _gemini_camel(key: str) -> str:
+    head, *rest = key.split('_')
+    return head + ''.join(part.title() for part in rest)
+
+
+def _gemini_rest_post(url: str, api_key: str, body: dict) -> dict:
+    """POST one generateContent chunk, retrying rate limits / 5xx / dropped connections
+    per chunk so a transient error doesn't throw away the chunks already generated."""
+    for attempt in range(1, GEMINI_CHUNK_ATTEMPTS + 1):
+        try:
+            r = httpx.post(url, headers={'x-goog-api-key': api_key}, json=body,
+                           timeout=httpx.Timeout(timeout=900.0, connect=10.0))
+        except httpx.TransportError as e:
+            if attempt == GEMINI_CHUNK_ATTEMPTS:
+                raise
+            logger.warning(f"gemini chunk transport error (attempt {attempt}/{GEMINI_CHUNK_ATTEMPTS}): {e}")
+            time.sleep(15 * attempt)
+            continue
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt == GEMINI_CHUNK_ATTEMPTS:
+                raise Exception(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
+            logger.warning(f"gemini chunk HTTP {r.status_code} (attempt {attempt}/{GEMINI_CHUNK_ATTEMPTS}), sleeping {30 * attempt}s")
+            time.sleep(30 * attempt)
+            continue
+        if r.status_code != 200:
+            raise Exception(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
+        return r.json()
+    raise Exception("unreachable")
+
+
+def chat_completion_gemini_continuation(
+    model: str, messages: Conversation, temperature: float, max_tokens: int, model_api_kwargs: API_Kwargs | None = None, api_dict: dict[str, str] | None = None, stream: bool = False
+) -> tuple[str, int, dict[str, Any] | None]:
+    """Gemini REST generateContent that follows finishReason=CONTINUATION.
+
+    Long generations come back in capped chunks: the server ends a chunk with
+    finishReason CONTINUATION plus a continuationToken, and resending the same
+    request with that token resumes the same generation. litellm maps the unknown
+    finish reason to 'stop' and drops the token, so a cut mid-thinking surfaced as
+    'No message returned' and a cut mid-answer was scored as a complete answer.
+    Opt in per model with api_kwargs gemini_continuation: true."""
+    kwargs = dict(model_api_kwargs or {})
+    kwargs.pop('gemini_continuation', None)
+    api_key = (api_dict or {}).get('api_key') or os.environ["GEMINI_API_KEY"]
+
+    generation_config: dict[str, Any] = {
+        'temperature': temperature,
+        'maxOutputTokens': kwargs.pop('max_output_tokens', None) or kwargs.pop('max_tokens', None) or max_tokens,
+    }
+    thinking = kwargs.pop('thinking_config', None)
+    if thinking:
+        generation_config['thinkingConfig'] = {_gemini_camel(k): v for k, v in thinking.items()}
+    generation_config.update({_gemini_camel(k): v for k, v in kwargs.items() if v is not None})
+
+    body: dict[str, Any] = {
+        'contents': [{'role': 'model' if m['role'] == 'assistant' else 'user', 'parts': [{'text': m['content']}]}
+                     for m in messages if m['role'] != 'system'],
+        'generationConfig': generation_config,
+    }
+    system = [m['content'] for m in messages if m['role'] == 'system']
+    if system:
+        body['systemInstruction'] = {'parts': [{'text': system[0]}]}
+
+    url = f"{GEMINI_REST_BASE}/models/{model}:generateContent"
+    text_parts: list[str] = []
+    output_tokens = input_tokens = cached_tokens = 0
+    chunks = 0
+    finish_reason = None
+    while True:
+        response = _gemini_rest_post(url, api_key, body)
+        chunks += 1
+        usage = response.get('usageMetadata') or {}
+        # each continuation re-reads the prompt plus everything generated so far (mostly cached)
+        input_tokens += usage.get('promptTokenCount') or 0
+        cached_tokens += usage.get('cachedContentTokenCount') or 0
+        output_tokens += (usage.get('candidatesTokenCount') or 0) + (usage.get('thoughtsTokenCount') or 0)
+        candidates = response.get('candidates') or []
+        if not candidates:
+            block = (response.get('promptFeedback') or {}).get('blockReason')
+            raise Exception(f"No candidates returned from Gemini (blockReason={block})")
+        candidate = candidates[0]
+        finish_reason = candidate.get('finishReason')
+        text_parts += [p['text'] for p in (candidate.get('content') or {}).get('parts', [])
+                       if p.get('text') and not p.get('thought')]
+        if finish_reason != 'CONTINUATION':
+            break
+        if chunks >= GEMINI_MAX_CHUNKS:
+            raise Exception(f"Gemini still continuing after {chunks} chunks")
+        body['continuationToken'] = candidate['continuationToken']
+
+    message = ''.join(text_parts)
+    metadata: dict[str, Any] = {'input_tokens': input_tokens, 'cached_tokens': cached_tokens,
+                                'continuation_chunks': chunks}
+    if not message:
+        if finish_reason == 'MAX_TOKENS':
+            logger.warning(f"Token exhaustion: model used all tokens ({output_tokens}), no content produced")
+            metadata['eval_status'] = 'token_exhaustion'
+            return '', output_tokens, metadata
+        raise Exception(f"No message returned from Gemini (finishReason={finish_reason}, chunks={chunks})")
+    return message, output_tokens, metadata
+
+
 @retry(
     stop=stop_after_attempt(API_MAX_RETRY),
     wait=gemini_custom_wait,
@@ -362,6 +532,8 @@ def gemini_custom_wait(retry_state):
 def chat_completion_google_generativeai(
     model: str, messages: Conversation, temperature: float, max_tokens: int, model_api_kwargs: API_Kwargs | None = None, api_dict: dict[str, str] | None = None, stream: bool = False
 ) -> tuple[str, int, dict[str, Any] | None]:
+    if (model_api_kwargs or {}).get('gemini_continuation'):
+        return chat_completion_gemini_continuation(model, messages, temperature, max_tokens, model_api_kwargs, api_dict, stream)
     from google import genai
     from google.genai import types
 
@@ -646,51 +818,17 @@ def chat_completion_anthropic(model: str, messages: Conversation, temperature: f
     return message_text, tokens, {'fallback_model': fallback_model} if fallback_model else None
 
 
-@retry(
-    stop=stop_after_attempt(API_MAX_RETRY),
-    wait=wait_fixed(API_RETRY_SLEEP_MIN),
-    retry=retry_if_exception_type(Exception),
-    after=retry_log,
-    retry_error_callback=retry_fail
-)
-def chat_completion_mistral(model: str, messages: Conversation, temperature: float, max_tokens: int, model_api_kwargs: API_Kwargs | None = None, api_dict: dict[str, str] | None = None, stream: bool = False) -> tuple[str, int]:
-    if api_dict is not None and "api_key" in api_dict:
-        api_key = api_dict["api_key"]
-    else:
-        api_key = os.environ["MISTRAL_API_KEY"]
-
-    from mistralai import UNSET, Mistral
-    client = Mistral(api_key=api_key)
-
-    # Set up API kwargs
-    api_kwargs: API_Kwargs = {
-        'max_tokens': max_tokens,
-        'temperature': temperature
+def chat_completion_mistral(model: str, messages: Conversation, temperature: float, max_tokens: int, model_api_kwargs: API_Kwargs | None = None, api_dict: dict[str, str] | None = None, stream: bool = False) -> tuple[str, int, dict[str, Any] | None]:
+    # Mistral's chat API is OpenAI-compatible, so it shares chat_completion_openai (usage,
+    # cached tokens, reasoning capture) instead of the mistralai SDK, which the eval venv
+    # does not ship (retries come from chat_completion_openai). Reasoning (reasoning_effort in api_kwargs) comes back as content
+    # chunk lists; _split_content_chunks routes the thinking to metadata['reasoning_content'].
+    api_dict = {
+        'api_key': (api_dict or {}).get('api_key') or os.environ['MISTRAL_API_KEY'],
+        'api_base': (api_dict or {}).get('api_base') or 'https://api.mistral.ai/v1',
     }
-    if model_api_kwargs is not None:
-        model_api_kwargs = {key: value for key, value in model_api_kwargs.items()}
-        api_kwargs.update(model_api_kwargs)
+    return chat_completion_openai(model, messages, temperature, max_tokens, model_api_kwargs, api_dict, stream)
 
-    actual_api_kwargs = {key: (value if value is not None else UNSET) for key, value in api_kwargs.items()}
-
-    chat_response = client.chat.complete(
-        model=model,
-        messages=messages,
-        **actual_api_kwargs
-    )
-
-    if chat_response is None:
-        raise Exception("No response returned from Mistral")
-    elif not hasattr(chat_response, 'choices') or not chat_response.choices:
-        raise Exception("No choices returned from Mistral")
-
-    message = chat_response.choices[0].message.content
-    if message is None:
-        raise Exception("No message returned from Mistral")
-
-    num_tokens = chat_response.usage.completion_tokens if hasattr(chat_response, 'usage') and hasattr(chat_response.usage, 'completion_tokens') else None
-
-    return message.strip(), num_tokens
 
 @retry(
     stop=stop_after_attempt(API_MAX_RETRY),
@@ -780,6 +918,9 @@ def chat_completion_litellm(
     # native Anthropic path, which forwards `fallbacks` + betas to the request body intact.
     if provider == 'anthropic' and (model_api_kwargs or {}).get('extra_body', {}).get('fallbacks') is not None:
         return chat_completion_anthropic(model, messages, temperature, max_tokens, model_api_kwargs, api_dict, stream)
+    # litellm drops Gemini's continuationToken (see chat_completion_gemini_continuation)
+    if provider == 'google' and (model_api_kwargs or {}).get('gemini_continuation'):
+        return chat_completion_gemini_continuation(model, messages, temperature, max_tokens, model_api_kwargs, api_dict, stream)
     # Anthropic long-stream reliability: litellm's default aiohttp transport drops
     # multi-minute streams; force httpx (what the native SDK uses).
     litellm.disable_aiohttp_transport = True
@@ -875,6 +1016,12 @@ def chat_completion_litellm(
             passthrough('thinking_config')
         elif '/responses/' in litellm_model:
             passthrough('reasoning')
+            # litellm fakes streaming (one non-streaming request replayed as chunks) for any
+            # Responses-API model missing from its model map, i.e. every non-OpenAI endpoint
+            # bridged here. Long generations then hit the provider's non-streaming time limit
+            # (Meta: gateway_timeout), and `timeout` bounds the whole generation, not chunk gaps.
+            if stream:
+                litellm.register_model({model: {'litellm_provider': 'openai', 'supports_native_streaming': True}})
 
     if stream and 'stream_options' not in actual_api_kwargs:
         actual_api_kwargs['stream_options'] = {'include_usage': True}
@@ -922,6 +1069,7 @@ def chat_completion_litellm(
                 if resp.usage is not None and last_usage is not None:
                     if not resp.usage.prompt_tokens and getattr(last_usage, 'prompt_tokens', None):
                         resp.usage.prompt_tokens = last_usage.prompt_tokens
+                resp._livebench_provider_total_tokens = litellm_stream_provider_total(chunks)
             return resp
         finally:
             if _call_client is not None:
@@ -943,6 +1091,16 @@ def chat_completion_litellm(
                 stream = False
                 actual_api_kwargs.pop('stream_options', None)
                 continue
+            # Upstream rate limit (e.g. OpenRouter "temporarily rate-limited upstream",
+            # limit_source=upstream_provider_shared_pool) -> back off and retry. litellm's own
+            # num_retries fires within seconds, which is useless against a shared pool that
+            # needs tens of seconds to drain; without this, a 429 burst turned 25 in-flight
+            # union-alpha questions into $ERROR$ rows at once (2026-09-16).
+            if _attempt < _MAX_ATTEMPTS and ('429' in err or 'rate limit' in err or 'rate-limit' in err or 'ratelimit' in err):
+                _wait = 30 * _attempt
+                logger.warning(f"{litellm_model} rate limited (attempt {_attempt}/{_MAX_ATTEMPTS}), sleeping {_wait}s: {e}")
+                time.sleep(_wait)
+                continue
             # Transient network / mid-stream drop -> retry the whole call.
             if _attempt < _MAX_ATTEMPTS and any(s in err for s in _TRANSIENT_STREAM_ERRS):
                 logger.warning(f"{litellm_model} transient stream error (attempt {_attempt}/{_MAX_ATTEMPTS}), retrying: {e}")
@@ -958,19 +1116,10 @@ def chat_completion_litellm(
     cached_tokens = None
     token_exhaustion = False
     if response.usage is not None:
-        num_tokens = response.usage.completion_tokens
-        # Thinking models bill reasoning as OUTPUT but report it OUTSIDE completion_tokens,
-        # under completion_tokens_details.reasoning_tokens. chat_completion_openai already
-        # folds it in (see the non-litellm path); this path did not, so every run made with
-        # --use-litellm under-counted output tokens -- and therefore cost -- by the whole
-        # reasoning trace. Measured on xAI: grok-4.5 completion=1015 + reasoning=1935,
-        # grok-4.6 completion=237 + reasoning=1901, i.e. a ~2-9x undercount depending on how
-        # verbose the visible answer is. Note usage.reasoning_tokens (top-level) is None for
-        # these providers, so only the details object is authoritative.
-        _ctd = getattr(response.usage, 'completion_tokens_details', None)
-        _reasoning = getattr(_ctd, 'reasoning_tokens', None) if _ctd is not None else None
-        if num_tokens is not None and _reasoning:
-            num_tokens += _reasoning
+        # Reasoning is added only where the provider bills it outside completion_tokens (xAI:
+        # grok-4.5 completion=1015 + reasoning=1935); elsewhere it is already included and
+        # adding it double-counts. See billed_output_tokens.
+        num_tokens = billed_output_tokens(response.usage, getattr(response, '_livebench_provider_total_tokens', None))
         input_tokens = response.usage.prompt_tokens
         cached_tokens = getattr(response.usage, 'cache_read_input_tokens', None) or 0
         if not cached_tokens and hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details is not None:

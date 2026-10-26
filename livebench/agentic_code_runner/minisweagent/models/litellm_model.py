@@ -2,11 +2,13 @@ import copy
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import httpx
 import litellm
 from tenacity import (
     before_sleep_log,
@@ -40,6 +42,16 @@ LENGTH_FINISH_REASON_MAX_ATTEMPTS = 3
 # fail fast -> retry -> error out, so the rest of the run survives. 600s matches the
 # gemini genai path's http timeout; a real completion never legitimately needs longer.
 _REQUEST_TIMEOUT_S = 600
+
+
+def _is_genai_gemini(model_name: str) -> bool:
+    """Gemini 3 and every later generation take the genai SDK path (native function
+    calls + thought signatures); a bare 'gemini-3' substring check silently routed
+    newer generations through litellm instead."""
+    m = re.search(r'gemini-(\d+)', model_name)
+    return bool(m) and int(m.group(1)) >= 3
+
+
 # A provider that keeps timing out / refusing the connection will not recover on the
 # 15th try, and each timed-out attempt already burned up to _REQUEST_TIMEOUT_S; cap these
 # low so one bad endpoint can't spend _DEFAULT_MAX_ATTEMPTS x 600s (~2.5h) on a single
@@ -83,6 +95,62 @@ def _cached_tokens(details) -> int:
     if details is None:
         return 0
     return getattr(details, 'cached_tokens', 0) or 0
+
+
+# Mistral reasoning models (mistral-large-4 with reasoning_effort) return content as a
+# chunk list [{type:'thinking', thinking:[{type:'text', text}]}, {type:'text', text}] and
+# expect the full assistant message, thinking chunk included, replayed on the next turn.
+# litellm's mistral/ provider can do neither: it flattens every list content to a string
+# (dropping the thinking from the replay) and strips/rejects reasoning_content. So mistral/
+# models go straight to the OpenAI-compatible HTTP endpoint (_query_mistral_direct).
+MISTRAL_API_BASE = "https://api.mistral.ai/v1"
+# litellm-only kwargs that must not reach the request body (Mistral 422s on unknown fields)
+_MISTRAL_NON_BODY_KWARGS = {
+    'allowed_openai_params', 'timeout', 'api_key', 'api_base', 'stream', 'stream_options',
+    'drop_params', 'extra_body', 'num_retries', 'metadata',
+}
+
+
+def _mistral_message(message: dict) -> dict | None:
+    """One replay message in Mistral's wire shape; None for an empty assistant turn."""
+    role = message.get('role')
+    out: dict[str, Any] = {'role': role}
+    content = message.get('content')
+    if role == 'assistant':
+        reasoning = message.get('reasoning_content')
+        if reasoning:
+            chunks: list[dict] = [{'type': 'thinking', 'thinking': [{'type': 'text', 'text': reasoning}]}]
+            if content:
+                chunks.append({'type': 'text', 'text': content})
+            content = chunks
+        tool_calls = [
+            {'id': tc['id'], 'type': 'function',
+             'function': {'name': tc['function']['name'], 'arguments': tc['function']['arguments']}}
+            for tc in (message.get('tool_calls') or [])
+        ]
+        if tool_calls:
+            out['tool_calls'] = tool_calls
+        if not content and not tool_calls:
+            return None  # Mistral rejects an assistant turn with neither (litellm drops it too)
+    elif role == 'tool':
+        out['tool_call_id'] = message['tool_call_id']
+        if message.get('name'):
+            out['name'] = message['name']
+    out['content'] = content if content is not None else ''
+    return out
+
+
+def _mistral_split_content(content) -> tuple[str | None, str]:
+    """(text, thinking) from a Mistral response content (str or chunk list)."""
+    if not isinstance(content, list):
+        return content, ''
+    text, thinking = [], []
+    for chunk in content:
+        if chunk.get('type') == 'text':
+            text.append(chunk.get('text') or '')
+        elif chunk.get('type') == 'thinking':
+            thinking.extend(c.get('text') or '' for c in chunk.get('thinking') or [] if c.get('type') == 'text')
+    return ''.join(text), ''.join(thinking)
 
 
 # Native tool calling, always on for Anthropic models: the bash action is a real
@@ -243,10 +311,10 @@ class LitellmModelConfig:
     # served alias lacks the family token (e.g. "r2e_step3" vs "qwen38-27b-base",
     # 2026-08-30), so an eval that needs channel parity should set this explicitly.
     native_tools: bool | None = None
-    # gemini-3 uses the genai SDK by default; False routes it through litellm (the
+    # Gemini 3+ uses the genai SDK by default; False routes it through litellm (the
     # replay keeps provider_specific_fields nested so thought signatures survive)
     native_gemini: bool = True
-    # gemini-3 via the Interactions API (explicit content_blocked / incomplete
+    # Gemini 3+ via the Interactions API (explicit content_blocked / incomplete
     # statuses instead of finish_reason guessing); False falls back to generateContent
     gemini_interactions: bool = True
 
@@ -920,7 +988,7 @@ class LitellmModel:
             return True
         if "inkling" in mn.lower() and self.config.api_type == "completion":     # Thinking Machines Inkling (Tinker OpenAI-compat chat, self-invoking tool_calls); same tool_calls path
             return True
-        if self.config.native_gemini and 'gemini-3' in mn:                      # Gemini genai generate_content (function_call parts)
+        if self.config.native_gemini and _is_genai_gemini(mn):                 # Gemini genai generate_content (function_call parts)
             return True
         return False
 
@@ -1044,15 +1112,20 @@ class LitellmModel:
             _wrap_tool_results_chat(messages_for_api)
 
         try:
-            res = litellm.completion(
-                model=self.config.model_name, messages=messages_for_api, **actual_kwargs
-            )
+            if self.config.model_name.startswith('mistral/'):
+                res = self._query_mistral_direct(messages_for_api, actual_kwargs)
+            else:
+                res = litellm.completion(
+                    model=self.config.model_name, messages=messages_for_api, **actual_kwargs
+                )
 
-            if actual_kwargs.get('stream', False):
+            if actual_kwargs.get('stream', False) and not self.config.model_name.startswith('mistral/'):
                 chunks = []
                 for chunk in res:
                     chunks.append(chunk)
                 res = litellm.stream_chunk_builder(chunks, messages=messages_for_api)
+                from livebench.model.completions import litellm_stream_provider_total
+                res._livebench_provider_total_tokens = litellm_stream_provider_total(chunks)
         except litellm.exceptions.InternalServerError as e:
             if "This model's maximum context length is" in str(e):
                 raise litellm.exceptions.ContextWindowExceededError(str(e), model=self.config.model_name, llm_provider=self.config.model_name) from e
@@ -1109,14 +1182,13 @@ class LitellmModel:
         if res and res.choices and len(res.choices) > 0:
             result['content'] = content
             result['input_tokens'] = res.usage.prompt_tokens
-            # Reasoning bills as OUTPUT but sits outside completion_tokens, under
-            # completion_tokens_details.reasoning_tokens. Without this, a thinking model's
-            # agentic cost is understated by its whole reasoning trace (xAI grok-4.6:
-            # completion=237 vs reasoning=1901 on one call). Same defect that affected the
-            # regular path in completions.py.
-            _ctd = getattr(res.usage, 'completion_tokens_details', None)
-            _reasoning = getattr(_ctd, 'reasoning_tokens', None) if _ctd is not None else None
-            result['output_tokens'] = (res.usage.completion_tokens or 0) + (_reasoning or 0)
+            # Reasoning is added only where the provider bills it outside completion_tokens
+            # (xAI grok-4.6: completion=237 vs reasoning=1901 on one call); elsewhere it is
+            # already included and adding it double-counts. See billed_output_tokens.
+            from livebench.model.completions import billed_output_tokens
+            result['output_tokens'] = billed_output_tokens(
+                res.usage, getattr(res, '_livebench_provider_total_tokens', None)
+            ) or 0
             # OpenAI/Anthropic report cache reads under prompt_tokens_details; Gemini-via-litellm
             # uses a top-level field, read only as a fallback to avoid double-counting.
             result['cached_tokens'] = (
@@ -1126,6 +1198,46 @@ class LitellmModel:
             # Cache writes (Anthropic only)
             result['cache_creation_input_tokens'] = getattr(res.usage, 'cache_creation_input_tokens', 0) or 0
         return result
+
+    def _query_mistral_direct(self, messages: list[dict], kwargs: dict) -> litellm.ModelResponse:
+        """One non-streaming chat completion against Mistral's API, replaying thinking
+        chunks (see MISTRAL_API_BASE). Errors are raised as the litellm exception types
+        the retry policy and the agent loop already key on."""
+        model = self.config.model_name.split('/', 1)[1]
+        body = {k: v for k, v in kwargs.items() if k not in _MISTRAL_NON_BODY_KWARGS}
+        body |= kwargs.get('extra_body') or {}
+        if 'max_completion_tokens' in body:
+            body['max_tokens'] = body.pop('max_completion_tokens')
+        body['model'] = model
+        body['messages'] = [m for m in (_mistral_message(m) for m in messages) if m is not None]
+        api_key = kwargs.get('api_key') or os.environ['MISTRAL_API_KEY']
+        api_base = (kwargs.get('api_base') or MISTRAL_API_BASE).rstrip('/')
+        err = {'model': model, 'llm_provider': 'mistral'}
+        try:
+            r = httpx.post(f"{api_base}/chat/completions", json=body, headers={'Authorization': f"Bearer {api_key}"},
+                           timeout=kwargs.get('timeout', _REQUEST_TIMEOUT_S))
+        except httpx.TimeoutException as e:
+            raise litellm.exceptions.Timeout(message=f"mistral request timed out: {e}", **err) from e
+        except httpx.TransportError as e:
+            raise litellm.exceptions.APIConnectionError(message=f"mistral connection error: {e}", **err) from e
+        if r.status_code != 200:
+            msg = f"mistral HTTP {r.status_code}: {r.text[:2000]}"
+            if r.status_code == 400 and 'context' in r.text.lower() and 'length' in r.text.lower():
+                raise litellm.exceptions.ContextWindowExceededError(message=msg, response=r, **err)
+            exc = {400: litellm.exceptions.BadRequestError, 401: litellm.exceptions.AuthenticationError,
+                   403: litellm.exceptions.PermissionDeniedError, 404: litellm.exceptions.NotFoundError,
+                   422: litellm.exceptions.BadRequestError, 429: litellm.exceptions.RateLimitError}.get(r.status_code)
+            if exc is None:
+                exc = litellm.exceptions.InternalServerError if r.status_code >= 500 else litellm.exceptions.BadRequestError
+            raise exc(message=msg, response=r, **err)
+        data = r.json()
+        for choice in data.get('choices') or []:
+            message = choice.get('message') or {}
+            text, thinking = _mistral_split_content(message.get('content'))
+            message['content'] = text
+            if thinking:
+                message['reasoning_content'] = thinking
+        return litellm.ModelResponse(**data)
 
     @retry(
         stop=stop_after_attempt(10),
@@ -1415,7 +1527,7 @@ class LitellmModel:
             else:
                 actual_messages.append(message_copy)
 
-        if self.config.native_gemini and 'gemini-3' in self.config.model_name:
+        if self.config.native_gemini and _is_genai_gemini(self.config.model_name):
             # Native tools -> generate_content: it's the only Gemini path that can FORCE
             # tool use (tool_config mode=ANY); the Interactions API supports tools too and
             # has nicer status/signature handling, but rejects tool_config, so under the

@@ -345,3 +345,73 @@ api_kwargs:
     max_output_tokens: 384000
     timeout: 3600
 preserve_reasoning: true
+---
+# DeepSeek V4.1 Flash (released 2026-09-10, https://api-docs.deepseek.com/updates) via DeepSeek's
+# OWN Responses endpoint, run at MAX reasoning effort. The API id is the UNPINNED alias
+# `deepseek-flash` (models.list on 2026-09-10 shows only deepseek-flash + deepseek-v4-pro; the
+# legacy deepseek-v4-flash / -vision-exp slugs now route here, and deepseek-v4-pro routes here
+# from 2026-09-14 12:00 Beijing). The display_name pins the build this row measured — re-check
+# the docs' version string before reusing these numbers. 1M context, 384K max output (docs).
+# Effort: thinking is default-ON at `high`; the Responses API takes `reasoning.effort` (probed
+# 2026-09-10: 'max' is echoed back as effort=max; the docs map minimal/low->low,
+# medium/high->high, xhigh/max/ultra->max). tool_choice='required' still 400s in thinking mode
+# ("Thinking mode does not support this tool_choice"), so the agentic path falls back to
+# 'auto' (_native_tool_choice gates on 'deepseek' in api_base). Same route shape as the
+# -0731-ds / -vision-exp entries above (no streaming; first-party allows hour-long requests).
+# PRICING verified 2026-09-10 against https://api-docs.deepseek.com/quick_start/pricing:
+# OFF-PEAK $0.15 in / $0.003 cache-hit / $0.60 out; PEAK (01:00-04:00 and 06:00-10:00 UTC,
+# Mon-Fri; all other hours incl. weekends are off-peak) is 2x: $0.30 / $0.006 / $1.20.
+# The rates below are the OFF-PEAK rates — launch inside the off-peak window; a run that
+# straddles a peak window is undercosted by up to 2x for that portion.
+display_name: deepseek-v4.1-flash-max
+cost_per_million:
+  input: 0.15
+  cached_input: 0.003
+  output: 0.6
+api_name:
+  openai_responses: deepseek-flash
+default_provider: openai_responses
+api_base: https://api.deepseek.com/v1
+api_keys:
+  openai_responses: DEEPSEEK_API_KEY
+api_kwargs:
+  default:
+    temperature: null
+  openai_responses:
+    reasoning:
+      effort: max
+    # explicit cap, never unset (an unset cap inherits the serving provider's default — see
+    # the truncation note on the -fw entry). 384000 = the documented model maximum.
+    max_output_tokens: 384000
+    timeout: 3600
+preserve_reasoning: true
+---
+# DeepSeek-V4.1-Flash-1017: served as `deepseek-flash` from 2026-10-17 (api-docs.deepseek.com/updates; the alias is
+# unpinned and no dated id exists). Same request as deepseek-v4.1-flash-max (the 0910 build), own display name so
+# its rows stay separate. Probed 2026-10-17: reasoning.effort max on the wire and echoed back.
+display_name: deepseek-v4.1-flash-1017-max
+# Off-peak list price (api-docs.deepseek.com/quick_start/pricing, 2026-10-17; peak is 2x: 0.30 / 0.006 / 1.20). User
+# decision 2026-10-18: DeepSeek rows are reported at DeepSeek's own off-peak rates. The answers of run
+# deepseek-v4_1-flash-1017-max-20261017-2255-27742 carry cost_usd at the earlier peak rates (total $9.87); off-peak
+# is exactly half ($4.93), which is what the board reports.
+cost_per_million:
+  input: 0.15
+  cached_input: 0.003
+  output: 0.6
+api_name:
+  openai_responses: deepseek-flash
+default_provider: openai_responses
+api_base: https://api.deepseek.com/v1
+api_keys:
+  openai_responses: DEEPSEEK_API_KEY
+api_kwargs:
+  default:
+    temperature: null
+  openai_responses:
+    reasoning:
+      effort: max
+    # explicit cap, never unset (an unset cap inherits the serving provider's default — see
+    # the truncation note on the -fw entry). 384000 = the documented model maximum.
+    max_output_tokens: 384000
+    timeout: 3600
+preserve_reasoning: true
